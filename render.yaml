@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: telegram-video-bot
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    plan: free                  # change to "starter" for always-on
+    envVars:
+      - key: BOT_TOKEN
+        sync: false             # set manually in Render dashboard
+      - key: WEBHOOK_URL
+        sync: false             # your Render service URL, e.g. https://telegram-video-bot.onrender.com
+      - key: PORT
+        value: "10000"
+      - key: MAX_WORKERS
+        value: "4"
+      - key: PYTHON_VERSION
+        value: "3.11.0"
+    healthCheckPath: /health
+    disk:
+      name: bot-storage
+      mountPath: /opt/render/project/src
+      sizeGB: 1

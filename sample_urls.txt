@@ -1,0 +1,17 @@
+# Sample video URL list
+# Lines starting with # are ignored
+# Blank lines are also ignored
+
+# Direct MP4 links
+https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4
+https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4
+https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4
+https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerEscapes.mp4
+https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerFun.mp4
+
+# Video with query params
+https://example.com/stream/video.mp4?token=abc123&quality=1080p
+https://cdn.example.com/media/clip_001.mp4
+
+# CDN-hosted video
+https://d2q79iu7y748jz.cloudfront.net/media/sample.mp4

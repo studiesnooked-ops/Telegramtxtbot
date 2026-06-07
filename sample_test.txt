@@ -1,0 +1,17 @@
+# Sample test file for the Video Extractor Bot
+# Upload this file to the bot to see it in action
+
+https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4
+https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4
+https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4
+https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerEscapes.mp4
+https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/SubaruOutbackOnStreetAndDirt.mp4
+Some random text in between that should be ignored
+https://www.w3schools.com/html/mov_bbb.mp4
+Not a valid URL: just-some-text.mp4
+Another line with no URL
+https://sample-videos.com/video321/mp4/720/big_buck_bunny_720p_1mb.mp4
+https://filesamples.com/samples/video/mp4/sample_960x400_ocean_with_audio.mp4
+https%3A%2F%2Fexample.com%2Fencoded-video.mp4
+https://cdn.example.com/media?file=video.mp4&quality=720p
+https://s3.us-east-1.amazonaws.com/my-bucket/content/promo-video.mp4
