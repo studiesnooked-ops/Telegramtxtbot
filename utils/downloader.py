@@ -1,7 +1,7 @@
 """
-Async video downloader with progress reporting.
-Downloads video files and forwards them to the Telegram chat.
-Files >50 MB: sends a direct link instead of uploading.
+Async video downloader with FFmpeg speed optimization.
+Downloads videos, processes them (FFmpeg), and sends to Telegram.
+Render-optimized version.
 """
 
 import asyncio
@@ -15,19 +15,22 @@ from typing import List, Optional
 from urllib.parse import urlparse, unquote
 
 from telegram import Bot
-from telegram.constants import FileSizeLimit
 
 from utils.queue_manager import QueueManager
+from utils.ffmpeg import get_ffmpeg_cmd, run_ffmpeg
 
 logger = logging.getLogger("bot.downloader")
 
 DOWNLOAD_DIR = Path("downloads")
-CHUNK_SIZE = 512 * 1024   # 512 KB
-SEND_SIZE_LIMIT = 50 * 1024 * 1024   # 50 MB – Telegram bot limit
+
+CHUNK_SIZE = 512 * 1024
+SEND_SIZE_LIMIT = 50 * 1024 * 1024
+
 CONNECT_TIMEOUT = 15
 READ_TIMEOUT = 120
+
 MAX_RETRIES = 3
-RETRY_DELAY = 3   # seconds
+RETRY_DELAY = 3
 
 HEADERS = {
     "User-Agent": (
@@ -36,70 +39,52 @@ HEADERS = {
         "Chrome/120.0.0.0 Safari/537.36"
     ),
     "Accept": "*/*",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Connection": "keep-alive",
 }
 
 
+# ───────────────────────── FILE NAME ─────────────────────────
+
 def _guess_filename(url: str, content_type: str = "") -> str:
-    """Derive a sensible filename from a URL or content-type."""
     path = unquote(urlparse(url).path)
     name = path.split("/")[-1]
-
-    # Strip query params that might be embedded
     name = re.sub(r"\?.*", "", name)
 
     if not name or "." not in name:
-        ext = "mp4"
-        if "webm" in content_type:
-            ext = "webm"
-        elif "ogg" in content_type or "ogv" in content_type:
-            ext = "ogv"
-        name = f"video_{int(time.time())}.{ext}"
+        name = f"video_{int(time.time())}.mp4"
 
-    # Sanitize
-    name = re.sub(r"[^\w.\-]", "_", name)
-    return name
+    return re.sub(r"[^\w.\-]", "_", name)
 
 
-async def _download_one(
-    session: aiohttp.ClientSession,
-    url: str,
-    dest_path: Path,
-    progress_cb=None,
-) -> bool:
-    """Download a single URL to dest_path. Returns True on success."""
+# ───────────────────────── DOWNLOAD ─────────────────────────
+
+async def _download_one(session, url, dest_path, progress_cb=None):
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            async with session.get(
-                url,
-                headers=HEADERS,
-                timeout=aiohttp.ClientTimeout(connect=CONNECT_TIMEOUT, total=READ_TIMEOUT * 10),
-                allow_redirects=True,
-            ) as resp:
+            async with session.get(url, headers=HEADERS) as resp:
                 resp.raise_for_status()
-                total = int(resp.headers.get("Content-Length", 0))
-                downloaded = 0
 
-                with open(dest_path, "wb") as fh:
+                total = int(resp.headers.get("Content-Length", 0))
+                done = 0
+
+                with open(dest_path, "wb") as f:
                     async for chunk in resp.content.iter_chunked(CHUNK_SIZE):
-                        fh.write(chunk)
-                        downloaded += len(chunk)
+                        f.write(chunk)
+                        done += len(chunk)
+
                         if progress_cb and total:
-                            await progress_cb(downloaded, total)
+                            await progress_cb(done, total)
 
             return True
 
-        except aiohttp.ClientResponseError as exc:
-            logger.warning("HTTP %s for %s (attempt %d)", exc.status, url, attempt)
-        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-            logger.warning("Network error %s for %s (attempt %d)", exc, url, attempt)
+        except Exception as e:
+            logger.warning("Download error %s (attempt %d)", e, attempt)
 
-        if attempt < MAX_RETRIES:
-            await asyncio.sleep(RETRY_DELAY * attempt)
+        await asyncio.sleep(RETRY_DELAY * attempt)
 
     return False
 
+
+# ───────────────────────── MAIN PIPELINE ─────────────────────────
 
 async def download_and_send_videos(
     bot: Bot,
@@ -107,121 +92,100 @@ async def download_and_send_videos(
     urls: List[str],
     queue_manager: Optional[QueueManager] = None,
 ) -> None:
-    """Download each URL and send the result to chat_id."""
+
     DOWNLOAD_DIR.mkdir(exist_ok=True)
 
-    connector = aiohttp.TCPConnector(limit=8, ssl=False)
+    connector = aiohttp.TCPConnector(limit=6, ssl=False)
+
     async with aiohttp.ClientSession(connector=connector) as session:
 
-        # Process up to 3 videos concurrently per call
-        sem = asyncio.Semaphore(3)
+        sem = asyncio.Semaphore(2)  # Render-safe limit
 
-        async def process(idx: int, url: str):
+        async def worker(i, url):
             async with sem:
-                await _process_single(bot, chat_id, session, idx, url, len(urls))
+                await _process(bot, chat_id, session, i, url, len(urls))
 
-        tasks = [asyncio.create_task(process(i, u)) for i, u in enumerate(urls, start=1)]
+        tasks = [
+            asyncio.create_task(worker(i, u))
+            for i, u in enumerate(urls, 1)
+        ]
+
         await asyncio.gather(*tasks, return_exceptions=True)
 
-    await bot.send_message(
-        chat_id,
-        f"✅ All done! Processed *{len(urls)}* video(s).",
-        parse_mode="Markdown",
-    )
+    await bot.send_message(chat_id, "✅ All videos processed successfully.")
 
 
-async def _process_single(
-    bot: Bot,
-    chat_id: int,
-    session: aiohttp.ClientSession,
-    idx: int,
-    url: str,
-    total: int,
-) -> None:
-    """Handle downloading and sending one video."""
-    status = await bot.send_message(
+# ───────────────────────── PROCESS SINGLE ─────────────────────────
+
+async def _process(bot, chat_id, session, idx, url, total):
+
+    msg = await bot.send_message(
         chat_id,
-        f"⬇️ *{idx}/{total}* Downloading…\n`{url[:80]}`",
-        parse_mode="Markdown",
+        f"⬇️ {idx}/{total} Downloading..."
     )
 
     filename = _guess_filename(url)
-    dest = DOWNLOAD_DIR / filename
+    raw_file = DOWNLOAD_DIR / f"raw_{filename}"
+    final_file = DOWNLOAD_DIR / f"final_{filename}"
 
-    # Progress callback (throttled to avoid Telegram flood limits)
-    last_edit: list = [0.0]
+    last_update = [0]
 
     async def progress(done, total_bytes):
         now = time.time()
-        if now - last_edit[0] < 3:
+        if now - last_update[0] < 2:
             return
-        last_edit[0] = now
-        pct = done / total_bytes * 100
-        bar_len = 16
-        filled = int(bar_len * done / total_bytes)
-        bar = "█" * filled + "░" * (bar_len - filled)
+        last_update[0] = now
+
+        pct = (done / total_bytes) * 100 if total_bytes else 0
+        bar = "█" * int(pct / 10) + "░" * (10 - int(pct / 10))
+
         try:
-            await status.edit_text(
-                f"⬇️ *{idx}/{total}* `{bar}` {pct:.0f}%\n"
-                f"`{_fmt_size(done)}` / `{_fmt_size(total_bytes)}`\n"
-                f"`{filename}`",
-                parse_mode="Markdown",
+            await msg.edit_text(
+                f"⬇️ {idx}/{total}\n{bar} {pct:.0f}%"
             )
-        except Exception:
+        except:
             pass
 
-    success = await _download_one(session, url, dest, progress_cb=progress)
+    success = await _download_one(session, url, raw_file, progress)
 
     if not success:
-        await status.edit_text(
-            f"❌ *{idx}/{total}* Failed after {MAX_RETRIES} retries.\n`{url[:80]}`",
-            parse_mode="Markdown",
-        )
+        await msg.edit_text(f"❌ Failed {idx}/{total}")
         return
 
-    file_size = dest.stat().st_size
-
-    if file_size <= SEND_SIZE_LIMIT:
-        try:
-            await status.edit_text(
-                f"📤 *{idx}/{total}* Sending `{filename}` ({_fmt_size(file_size)})…",
-                parse_mode="Markdown",
-            )
-            with open(dest, "rb") as fh:
-                await bot.send_video(
-                    chat_id,
-                    video=fh,
-                    filename=filename,
-                    caption=f"🎬 `{filename}`\n📦 {_fmt_size(file_size)}",
-                    parse_mode="Markdown",
-                    supports_streaming=True,
-                )
-            await status.delete()
-        except Exception as exc:
-            logger.exception("Failed to send %s: %s", filename, exc)
-            await status.edit_text(
-                f"⚠️ *{idx}/{total}* Downloaded but failed to send: `{exc}`",
-                parse_mode="Markdown",
-            )
-    else:
-        # File too big to send via bot API – give them the direct link
-        await status.edit_text(
-            f"📦 *{idx}/{total}* `{filename}` is {_fmt_size(file_size)} "
-            f"(over Telegram's 50 MB limit).\n\n"
-            f"🔗 Direct link:\n`{url}`",
-            parse_mode="Markdown",
+    # ── FFmpeg SPEED OPTIMIZATION STEP ──
+    try:
+        cmd = get_ffmpeg_cmd(
+            str(raw_file),
+            str(final_file),
+            fast_mode=True
         )
 
-    # Cleanup downloaded file
+        await run_ffmpeg(cmd)
+
+    except Exception as e:
+        await msg.edit_text(f"⚠️ FFmpeg error: {e}")
+        return
+
+    size = final_file.stat().st_size
+
+    # ── SEND VIDEO ──
+    if size <= SEND_SIZE_LIMIT:
+        try:
+            with open(final_file, "rb") as f:
+                await bot.send_video(
+                    chat_id,
+                    video=f,
+                    caption=f"🎬 {filename}"
+                )
+            await msg.delete()
+        except Exception as e:
+            await msg.edit_text(f"⚠️ Send error: {e}")
+    else:
+        await msg.edit_text("📦 File too large for Telegram")
+
+    # cleanup
     try:
-        dest.unlink(missing_ok=True)
-    except Exception:
+        raw_file.unlink(missing_ok=True)
+        final_file.unlink(missing_ok=True)
+    except:
         pass
-
-
-def _fmt_size(n: int) -> str:
-    for unit in ("B", "KB", "MB", "GB"):
-        if abs(n) < 1024:
-            return f"{n:.1f} {unit}"
-        n /= 1024
-    return f"{n:.1f} TB"
