@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Telegram Video Extractor Bot (Polling Mode)
-Stable Render deployment version (NO WEBHOOK)
+Telegram Video Extractor Bot (Polling + Render Web Service compatible)
 """
 
 import os
 import sys
 import logging
+import threading
 from pathlib import Path
 
 from telegram import Update
@@ -14,7 +14,6 @@ from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
-    ContextTypes,
     filters,
 )
 
@@ -31,6 +30,10 @@ from handlers.callback_handler import handle_callback
 from utils.logger import setup_logger
 from utils.queue_manager import QueueManager
 
+# 🔥 ADD HEALTH SERVER IMPORT
+from utils.health_server import run_health_server
+
+
 # ── Config ────────────────────────────────────────────────────
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 MAX_WORKERS = int(os.environ.get("MAX_WORKERS", 4))
@@ -38,7 +41,7 @@ MAX_WORKERS = int(os.environ.get("MAX_WORKERS", 4))
 logger = setup_logger("bot", "logs/bot.log")
 
 
-# ── Environment check ─────────────────────────────────────────
+# ── ENV CHECK ────────────────────────────────────────────────
 def validate_env():
     if not BOT_TOKEN:
         logger.critical("BOT_TOKEN is missing!")
@@ -58,7 +61,7 @@ async def post_shutdown(application: Application):
     logger.info("Bot shutdown complete")
 
 
-# ── Build bot ────────────────────────────────────────────────
+# ── BUILD BOT ────────────────────────────────────────────────
 def build_application() -> Application:
     app = (
         Application.builder()
@@ -75,27 +78,34 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("status", status_command))
     app.add_handler(CommandHandler("cancel", cancel_command))
 
-    # File uploads (.txt)
+    # File uploads
     app.add_handler(MessageHandler(filters.Document.TXT, handle_txt_file))
 
-    # Callback queries (buttons)
+    # Callback queries
     app.add_handler(handle_callback)
 
     return app
 
 
-# ── Main ──────────────────────────────────────────────────────
+# ── MAIN ──────────────────────────────────────────────────────
 def main():
     validate_env()
 
-    # Create required folders
+    # Create folders
     for folder in ("logs", "uploads", "downloads"):
         Path(folder).mkdir(exist_ok=True)
 
     application = build_application()
 
-    logger.info("Bot starting in POLLING mode...")
+    logger.info("Starting WEB SERVICE MODE (Polling + Health server)")
 
+    # 🔥 START HEALTH SERVER (REQUIRED FOR RENDER WEB SERVICE)
+    threading.Thread(
+        target=run_health_server,
+        daemon=True
+    ).start()
+
+    # Start Telegram bot
     application.run_polling(
         allowed_updates=Update.ALL_TYPES,
         drop_pending_updates=True,
